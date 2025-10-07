@@ -1,17 +1,9 @@
-import React, { useMemo, useState, useDeferredValue, useEffect } from "react";
+import React, { useMemo, useState } from "react";
 
 // LIVE DEMO — Multi-Unit + Sq Ft + Rent Mode ($/mo or $/SF/Mo)
-// Smooth typing in ALL inputs • No spinner arrows • Right-aligned numbers
+// Per-unit fields: name, sqft, rentMode, rate (interpreted by mode), misc/mo.
 
-// ───────────────────────── Helpers ─────────────────────────
-const toNum = (x) => {
-  if (x === null || x === undefined) return 0;
-  const s = String(x).trim();
-  if (s === "") return 0;
-  const n = parseFloat(s.replace(/,/g, ""));
-  return Number.isFinite(n) ? n : 0;
-};
-
+// ───────────────────────── Finance helpers ─────────────────────────
 function pmntAPR(principal, aprPct, nMonths){
   const r = aprPct/100/12; if (!(principal>0) || !(r>0) || !(nMonths>0)) return 0;
   return (principal*r)/(1-Math.pow(1+r,-nMonths));
@@ -29,7 +21,8 @@ function irrMonthly(cf){
   try{
     if (!Array.isArray(cf) || cf.length < 2) return null;
     const min = Math.min(...cf), max = Math.max(...cf);
-    if (!(min < 0 && max > 0)) return null;
+    if (!(min < 0 && max > 0)) return null; // needs sign change
+
     let x = 0.01; const tol = 1e-7;
     for(let k=0;k<100;k++){
       let f=0, df=0; 
@@ -37,6 +30,7 @@ function irrMonthly(cf){
       if (Math.abs(df) < 1e-12) break;
       const x1 = x - f/df; if(!isFinite(x1)) break; if(Math.abs(x1-x)<tol){ x=x1; return (Math.pow(1+x,12)-1)*100; } x=x1;
     }
+
     let lo=-0.99, hi=1.0; const npv=(r)=> cf.reduce((acc,v,i)=> acc + v/Math.pow(1+r,i),0);
     let fLo=npv(lo), fHi=npv(hi); if (!isFinite(fLo)||!isFinite(fHi)) return null; if (fLo*fHi>0) return null;
     for(let i=0;i<200;i++){
@@ -51,7 +45,7 @@ function irrMonthly(cf){
 
 // Interpret a unit's monthly rent based on mode and sqft
 function unitMonthlyRent(u){
-  const sqft = toNum(u.sqft); const rate = toNum(u.rate); const mode = u.rentMode||"monthly";
+  const sqft = Number(u.sqft)||0; const rate = Number(u.rate)||0; const mode = u.rentMode||"monthly";
   if (mode === "psf") return rate * sqft; // $/SF/Mo * SqFt
   return rate; // $/mo
 }
@@ -59,21 +53,21 @@ function unitMonthlyRent(u){
 function compute(inputs){
   const units = Array.isArray(inputs.units)? inputs.units : [];
   const baseRent = units.reduce((a,u)=> a + unitMonthlyRent(u), 0);
-  const baseMisc = units.reduce((a,u)=> a + (toNum(u.misc)||0), 0);
+  const baseMisc = units.reduce((a,u)=> a + (Number(u.misc)||0), 0);
 
-  const rentGrowth = toNum(inputs.rentGrowthAnnualPct ?? 3)/100;
-  const expenseInfl = toNum(inputs.expenseInflationAnnualPct ?? 2.5)/100;
-  const otherOpsPct = toNum(inputs.otherOpsPctOfRent ?? 30)/100;
-  const sellingPct = toNum(inputs.sellingCostsPct ?? 6)/100;
+  const rentGrowth = (inputs.rentGrowthAnnualPct ?? 3)/100;
+  const expenseInfl = (inputs.expenseInflationAnnualPct ?? 2.5)/100;
+  const otherOpsPct = (inputs.otherOpsPctOfRent ?? 30)/100;
+  const sellingPct = (inputs.sellingCostsPct ?? 6)/100;
 
-  const totalCost = toNum(inputs.purchasePrice) + toNum(inputs.closingCosts) + toNum(inputs.loanCosts) + toNum(inputs.rehab) + toNum(inputs.miscCosts);
-  const loanAmount = toNum(inputs.loanPct)/100 * toNum(inputs.purchasePrice);
-  const termMonths = Math.max(1, toNum(inputs.amortYears)*12);
-  const horizonMonths = Math.max(1, toNum(inputs.holdYears)*12);
-  const amort = amortSchedule(loanAmount, toNum(inputs.interestRatePct), termMonths, horizonMonths);
+  const totalCost = (inputs.purchasePrice||0) + (inputs.closingCosts||0) + (inputs.loanCosts||0) + (inputs.rehab||0) + (inputs.miscCosts||0);
+  const loanAmount = (inputs.loanPct/100) * (inputs.purchasePrice||0);
+  const termMonths = Math.max(1, (inputs.amortYears||0)*12);
+  const horizonMonths = Math.max(1, (inputs.holdYears||1)*12);
+  const amort = amortSchedule(loanAmount, inputs.interestRatePct||0, termMonths, horizonMonths);
   const monthlyPmt = amort.payment||0;
 
-  const vacancy = toNum(inputs.vacancyPct)/100; const cfs=[-(totalCost - loanAmount)];
+  const vacancy = (inputs.vacancyPct||0)/100; const cfs=[-(totalCost - loanAmount)];
   let last12NOI=[]; let seriesCF=[]; 
   let monthlyNOI=0, monthlyCFAfterDebt=0;
   for(let m=1;m<=horizonMonths;m++){
@@ -81,7 +75,7 @@ function compute(inputs){
     const rent = baseRent*Math.pow(1+rentGrowth,t);
     const misc = baseMisc*Math.pow(1+rentGrowth,t);
     const collected = (rent+misc)*(1-vacancy);
-    const pm = toNum(inputs.propMgmtPct)/100*collected;
+    const pm = ((inputs.propMgmtPct||0)/100)*collected;
     const other = otherOpsPct*baseRent*Math.pow(1+expenseInfl,t);
     const noi = Math.max(0, collected - pm - other);
     const cf = noi - monthlyPmt; cfs.push(cf); seriesCF.push(cf);
@@ -89,7 +83,7 @@ function compute(inputs){
     last12NOI.push(noi); if (last12NOI.length>12) last12NOI.shift();
   }
   const stabilizedNOI = last12NOI.reduce((a,b)=>a+b,0);
-  const exitCap = toNum(inputs.exitCapPct)/100;
+  const exitCap = (inputs.exitCapPct||0)/100;
   const salePrice = exitCap>0 ? stabilizedNOI/exitCap : 0;
   const sellingCosts = sellingPct*salePrice; const payoff = amort.finalBalance||0;
   const netProceeds = Math.max(0, salePrice - sellingCosts - payoff);
@@ -168,30 +162,17 @@ function Section({ title, emoji, children, tone="slate" }){
   );
 }
 
-function GlobalStyles(){
-  return (
-    <style>{`
-      /* Hide number input arrows */
-      input[type=number]::-webkit-inner-spin-button,
-      input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
-      input[type=number] { -moz-appearance: textfield; }
-      /* Right align numeric inputs */
-      input[type=number], input[data-align="right"] { text-align: right; }
-    `}</style>
-  );
-}
-
-// Units editor (with sqft + rent mode)
+// Units editor (now with sqft + rent mode)
 function UnitsEditor({ units, setUnits }){
   function update(i, key, value){
     const next = units.map((u,idx)=> idx===i? { ...u, [key]: value }: u);
     setUnits(next);
   }
-  function add(){ setUnits([ ...units, { name: `Unit ${units.length+1}`, sqft: "", rentMode: "monthly", rate: "", misc: "" } ]); }
+  function add(){ setUnits([ ...units, { name: `Unit ${units.length+1}`, sqft: 800, rentMode: "monthly", rate: 1200, misc: 15 } ]); }
   function remove(i){ setUnits(units.filter((_,idx)=> idx!==i)); }
 
   const totalRent = units.reduce((a,u)=> a + unitMonthlyRent(u), 0);
-  const totalMisc = units.reduce((a,u)=> a + (toNum(u.misc)||0), 0);
+  const totalMisc = units.reduce((a,u)=> a + (Number(u.misc)||0), 0);
 
   return (
     <div>
@@ -218,16 +199,18 @@ function UnitsEditor({ units, setUnits }){
               return (
                 <tr key={i} className="border-t">
                   <td className="py-2 pr-3"><input className="w-full rounded-lg border px-2 py-1" value={u.name} onChange={e=>update(i,'name',e.target.value)} /></td>
-                  <td className="py-2 pr-3 text-right"><input type="number" data-align="right" className="w-24 rounded-lg border px-2 py-1 text-right" value={u.sqft ?? ''} onChange={e=>update(i,'sqft',e.target.value)} /></td>
+                  <td className="py-2 pr-3 text-right"><input type="number" className="w-24 rounded-lg border px-2 py-1 text-right" value={u.sqft||0} onChange={e=>update(i,'sqft',Number(e.target.value)||0)} /></td>
                   <td className="py-2 pr-3">
                     <select className="rounded-lg border px-2 py-1" value={u.rentMode||'monthly'} onChange={e=>update(i,'rentMode',e.target.value)}>
                       <option value="monthly">$ / month</option>
                       <option value="psf">$ / SF / Mo</option>
                     </select>
                   </td>
-                  <td className="py-2 pr-3 text-right"><input type="number" data-align="right" className="w-28 rounded-lg border px-2 py-1 text-right" value={u.rate ?? ''} onChange={e=>update(i,'rate',e.target.value)} /></td>
+                  <td className="py-2 pr-3 text-right">
+                    <input type="number" className="w-28 rounded-lg border px-2 py-1 text-right" value={u.rate||0} onChange={e=>update(i,'rate',Number(e.target.value)||0)} />
+                  </td>
                   <td className="py-2 pr-3 text-right">{fmt$(monthly)}</td>
-                  <td className="py-2 pr-3 text-right"><input type="number" data-align="right" className="w-28 rounded-lg border px-2 py-1 text-right" value={u.misc ?? ''} onChange={e=>update(i,'misc',e.target.value)} /></td>
+                  <td className="py-2 pr-3 text-right"><input type="number" className="w-28 rounded-lg border px-2 py-1 text-right" value={u.misc||0} onChange={e=>update(i,'misc',Number(e.target.value)||0)} /></td>
                   <td className="py-2 text-center"><button className="px-2 py-1 text-rose-600" onClick={()=>remove(i)}>Remove</button></td>
                 </tr>
               );
@@ -251,8 +234,38 @@ function UnitsEditor({ units, setUnits }){
   );
 }
 
-const Metric = React.memo(function Metric({label, value, kind, tone}){
-  return (
+// ───────────────────────── Component ─────────────────────────
+export default function LiveDemo(){
+  const [name, setName] = useState("Demo Analysis");
+  const [inputs, setInputs] = useState({
+    purchasePrice: 460000, closingCosts: 7500, loanCosts: 3500, rehab: 40241, miscCosts: 0,
+    loanPct: 75, interestRatePct: 6.25, amortYears: 30,
+    vacancyPct: 7, propMgmtPct: 10,
+    holdYears: 5, exitCapPct: 6.5, rentGrowthAnnualPct: 3, expenseInflationAnnualPct: 2.5, otherOpsPctOfRent: 30, sellingCostsPct: 6,
+    units: [
+      { name: "Unit 1", sqft: 800, rentMode: "monthly", rate: 1200, misc: 15 },
+      { name: "Unit 2", sqft: 820, rentMode: "monthly", rate: 1200, misc: 15 },
+      { name: "Unit 3", sqft: 780, rentMode: "psf", rate: 1.6, misc: 15 },
+      { name: "Unit 4", sqft: 900, rentMode: "psf", rate: 1.55, misc: 15 }
+    ]
+  });
+
+  const r = useMemo(()=> compute(inputs), [inputs]);
+
+  const Field = ({k,label,suffix,step=1}) => (
+    <label className="block mb-3">
+      <div className="flex items-center justify-between">
+        <span className="block text-sm text-slate-600">{label}</span>
+        {typeof inputs[k] === 'number' && <Badge tone="slate">{inputs[k]}</Badge>}
+      </div>
+      <input type="number" step={step} className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-indigo-500"
+        value={inputs[k]}
+        onChange={e=> setInputs(prev=>({...prev, [k]: Number(e.target.value)||0})) } />
+      {suffix && <div className="text-xs text-slate-400 mt-1">{suffix}</div>}
+    </label>
+  );
+
+  const Metric = ({label, value, kind, tone}) => (
     <div className="rounded-2xl p-4 border shadow bg-white">
       <div className="flex items-center justify-between">
         <span className="text-sm text-slate-500">{label}</span>
@@ -263,52 +276,9 @@ const Metric = React.memo(function Metric({label, value, kind, tone}){
       </div>
     </div>
   );
-});
-
-export default function LiveDemo(){
-  const [name, setName] = useState("Demo Analysis");
-  const [form, setForm] = useState({
-    purchasePrice: "460000", closingCosts: "7500", loanCosts: "3500", rehab: "40241", miscCosts: "0",
-    loanPct: "75", interestRatePct: "6.25", amortYears: "30",
-    vacancyPct: "7", propMgmtPct: "10",
-    holdYears: "5", exitCapPct: "6.5", rentGrowthAnnualPct: "3", expenseInflationAnnualPct: "2.5", otherOpsPctOfRent: "30", sellingCostsPct: "6"
-  });
-  const [units, setUnits] = useState([
-    { name: "Unit 1", sqft: "800", rentMode: "monthly", rate: "1200", misc: "15" },
-    { name: "Unit 2", sqft: "820", rentMode: "monthly", rate: "1200", misc: "15" },
-    { name: "Unit 3", sqft: "780", rentMode: "psf", rate: "1.6", misc: "15" },
-    { name: "Unit 4", sqft: "900", rentMode: "psf", rate: "1.55", misc: "15" }
-  ]);
-
-  const computeInputs = useMemo(()=> ({...(form), units}), [form, units]);
-  const deferredInputs = useDeferredValue(computeInputs);
-  const r = useMemo(()=> compute(deferredInputs), [deferredInputs]);
-
-  const Field = ({k,label,suffix,step=1}) => {
-    const parentVal = form[k] ?? '';
-    const [text, setText] = useState(parentVal);
-    useEffect(() => { if (parentVal !== text) setText(parentVal); }, [parentVal]);
-    return (
-      <label className="block mb-3">
-        <div className="flex items-center justify-between">
-          <span className="block text-sm text-slate-600">{label}</span>
-        </div>
-        <input
-          type="number"
-          data-align="right"
-          step={step}
-          className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-indigo-500 text-right"
-          value={text}
-          onChange={e=> { const v = e.target.value; setText(v); setForm(prev=>({...prev, [k]: v})); }}
-        />
-        {suffix && <div className="text-xs text-slate-400 mt-1">{suffix}</div>}
-      </label>
-    );
-  };
 
   return (
     <div className="min-h-screen p-6 bg-gradient-to-b from-slate-50 to-slate-100">
-      <GlobalStyles />
       <div className="max-w-7xl mx-auto">
         <header className="mb-6 flex items-center justify-between">
           <div>
@@ -345,7 +315,7 @@ export default function LiveDemo(){
               </Section>
 
               <Section title="Units & Rents" emoji="🏢" tone="emerald">
-                <UnitsEditor units={units} setUnits={setUnits} />
+                <UnitsEditor units={inputs.units} setUnits={(u)=> setInputs(prev=>({...prev, units: u}))} />
               </Section>
 
               <Section title="Global Ops" emoji="⚙️" tone="rose">
